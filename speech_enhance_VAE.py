@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Copyright (c) 2019 by Inria
+Authored by Mostafa Sadeghi (mostafa.sadeghi@inria.fr)
+License agreement in LICENSE.txt
+"""
+
+import torch
+import numpy as np
+import soundfile as sf 
+import librosa
+import torch.nn as nn
+
+from MCEM_algo import MCEM_algo, MCEM_algo_cvae, VI_MCEM_algo
+
+from AV_VAE import myVAE, CVAERTied, myDecoder, CDecoderRTied
+from sisnr import si_snr, si_snri
+import os
+import sys
+import argparse
+
+
+#%% network parameters
+
+input_dim = 513
+latent_dim = 32
+device = 'cpu' # 'cuda' 
+hidden_dim_encoder = [128]
+activation = torch.tanh
+activationv = nn.ReLU()
+landmarks_dim = 67*67 # if you use raw video data, this dimension should be 67*67. Otherwise, if you use the
+#                       pre-trained ASR feature extractor, this dimension is 1280
+
+#%% MCEM algorithm parameters
+
+niter_MCEM = 100 # number of iterations for the MCEM algorithm
+niter_MH = 40 # total number of samples for the Metropolis-Hastings algorithm
+burnin = 30 # number of initial samples to be discarded
+var_MH = 0.01 # variance of the proposal distribution
+tol = 1e-5 # tolerance for stopping the MCEM iterations
+    
+    
+#%% STFT parameters
+
+wlen_sec=64e-3
+hop_percent= 0.521 
+   
+  
+fs=16000
+wlen = int(wlen_sec*fs) # window length of 64 ms
+wlen = np.int(np.power(2, np.ceil(np.log2(wlen)))) # next power of 2
+  
+wlen = int(wlen_sec*fs) # window length of 64 ms
+wlen = np.int(np.power(2, np.ceil(np.log2(wlen)))) # next power of 2
+nfft = wlen
+hop = np.int(hop_percent*wlen) # hop size
+win = np.sin(np.arange(.5,wlen-.5+1)/wlen*np.pi); # sine analysis window
+ 
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--mix_file', type=str, help='Audio mix file')
+parser.add_argument('--clean_file', type=str, default='', help='Clean audio file (optional, for SI-SNRi calculation)')
+parser.add_argument('--video_feat', type=str, help='Video feature file')
+parser.add_argument('--models_dir', type=str, default='./models/', help='VAE Models directory')
+parser.add_argument('--result_dir', type=str, help='Result directory')
+
+
+args = parser.parse_args()
+mix_file = args.mix_file
+clean_file = args.clean_file
+video_feat = args.video_feat
+models_dir = args.models_dir
+result_dir = args.result_dir
+
+if not os.path.isdir(result_dir):
+    os.makedirs(result_dir)
+    
+#%% Read input audio and video observations:
+
+x, fs = librosa.load(mix_file, sr=None)
+x = x/np.max(np.abs(x)) # normalize input mixture
+v = np.load(video_feat)     
+T_orig = len(x)
+
+# Load clean audio if provided (for SI-SNRi calculation)
+clean_audio = None
+if clean_file and os.path.exists(clean_file):
+    clean_audio, _ = librosa.load(clean_file, sr=fs)
+    # Ensure same length as mixture
+    if len(clean_audio) > T_orig:
+        clean_audio = clean_audio[:T_orig]
+    elif len(clean_audio) < T_orig:
+        clean_audio = np.pad(clean_audio, (0, T_orig - len(clean_audio)))
+    print(f'[Info] Loaded clean audio from {clean_file} for SI-SNRi calculation')
+else:
+    print('[Info] No clean audio file provided, SI-SNRi will not be calculated')
+
+
+K_b = 10 # NMF rank for noise model
+
+X = librosa.stft(x, n_fft=nfft, hop_length=hop, win_length=wlen, window=win)
+
+
+# Observed power spectrogram of the noisy mixture signal
+X_abs_2 = np.abs(X)**2
+X_abs_2_tensor = torch.from_numpy(X_abs_2.astype(np.float32))
+
+F, N = X.shape
+
+# check if the number of video frames is equal to the number of spectrogram frames. If not, augment video by repeating the last frame:
+Nl = np.maximum(N, v.shape[1])
+
+if v.shape[1] < Nl:
+    v = np.hstack((v, np.tile(v[:, [-1]], Nl-v.shape[1])))
+  
+v = v.T
+v = torch.from_numpy(v.astype(np.float32))
+v.requires_grad = False
+
+
+# Random initialization of NMF parameters
+eps = np.finfo(float).eps
+np.random.seed(0)
+W0 = np.maximum(np.random.rand(F,K_b), eps)
+H0 = np.maximum(np.random.rand(K_b,N), eps)
+
+
+V_b0 = W0@H0
+V_b_tensor0 = torch.from_numpy(V_b0.astype(np.float32))
+
+# All-ones initialization of the gain parameters
+g0 = np.ones((1,N))
+g_tensor0 = torch.from_numpy(g0.astype(np.float32))
+
+#%% Here, we test the performance of audio-only VAE. For that, we need to set blockVenc = 1 and blockVdec = 1 such that
+#   the path from visual data in the encoder and decoder is blocked.
+
+saved_model_a_vae = os.path.join(models_dir, 'A_VAE_checkpoint.pt')  
+# Loading the pre-trained model:  
+vae = myVAE(input_dim = input_dim, latent_dim = latent_dim, hidden_dim_encoder = hidden_dim_encoder,
+            activation = activation, activationv = activationv,
+            blockZ = 0., blockVenc = 1., blockVdec = 1.,
+            x_block = 0., landmarks_dim = 1280).to(device)
+
+checkpoint = torch.load(saved_model_a_vae, map_location = 'cpu', weights_only=False) 
+vae.load_state_dict(checkpoint['model_state_dict'], strict = False)
+decoder = myDecoder(vae)
+
+# As we do not train the models, we set them to the "eval" mode:
+vae.eval()
+decoder.eval()
+
+v0 = np.zeros((Nl, 1280))
+v0 = torch.from_numpy(v0.astype(np.float32))
+v0.requires_grad = False
+
+# we will not update the network parameters
+for param in decoder.parameters():
+    param.requires_grad = False
+
+# Initialize the latent variables by encoding the noisy mixture 
+with torch.no_grad():
+    data_orig = X_abs_2
+    data = data_orig.T
+    data = torch.from_numpy(data.astype(np.float32))
+    data = data.to(device)
+    vae.eval()
+    z, _ = vae.encode(data, v0)
+    z = torch.t(z)
+    
+Z_init = z.numpy()    
+# Instanciate the MCEM algo
+mcem_algo = MCEM_algo(X=X, W=W0, H=H0, Z=Z_init, v = v0, decoder=decoder,
+                      niter_MCEM=niter_MCEM, niter_MH=niter_MH, burnin=burnin,
+                      var_MH=var_MH)
+
+# Run the MCEM algo
+cost, niter_final = mcem_algo.run(hop=hop, wlen=wlen, win=win, tol=tol)
+
+# Separate the sources from the estimated parameters
+mcem_algo.separate(niter_MH=100, burnin=75)
+
+s_hat = librosa.istft(stft_matrix=mcem_algo.S_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+b_hat = librosa.istft(stft_matrix=mcem_algo.N_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+
+
+# save the results:
+save_vae = os.path.join(result_dir, 'A-VAE')
+if not os.path.isdir(save_vae):
+    os.makedirs(save_vae)
+    
+sf.write(os.path.join(save_vae,'est_speech.wav'), s_hat, fs)
+sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
+
+# Calculate SI-SNRi if clean audio is provided
+if clean_audio is not None:
+    si_snri_val, si_snr_noisy, si_snr_enhanced = si_snri(clean_audio, x, s_hat)
+    print(f'A-VAE Results:')
+    print(f'  SI-SNR (noisy): {si_snr_noisy:.2f} dB')
+    print(f'  SI-SNR (enhanced): {si_snr_enhanced:.2f} dB')
+    print(f'  SI-SNRi: {si_snri_val:.2f} dB')
+    
+    # Save metrics to file
+    with open(os.path.join(save_vae, 'metrics.txt'), 'w') as f:
+        f.write(f'SI-SNR (noisy): {si_snr_noisy:.2f} dB\n')
+        f.write(f'SI-SNR (enhanced): {si_snr_enhanced:.2f} dB\n')
+        f.write(f'SI-SNRi: {si_snri_val:.2f} dB\n')
+
+
+
+print('A-VAE finished ...\n')
+
+#%% Here, we test the performance of audio-visual VAE where the prior for z is standard Gaussian. For that, we need to set blockVenc = 0., blockVdec = 0.
+#   to allow the visual information go through the encoder and decoder
+  
+saved_model_av_vae = os.path.join(models_dir, 'AV_VAE_checkpoint.pt') 
+# Loading the pre-trained model:  
+vae = myVAE(input_dim = input_dim, latent_dim = latent_dim, hidden_dim_encoder = hidden_dim_encoder,
+            activation = activation, activationv = activationv,
+            blockZ = 0., blockVenc = 0., blockVdec = 0.,
+            x_block = 0., landmarks_dim = landmarks_dim).to(device)
+
+checkpoint = torch.load(saved_model_av_vae, map_location = 'cpu', weights_only=False) 
+vae.load_state_dict(checkpoint['model_state_dict'], strict = False)
+decoder = myDecoder(vae)
+
+# As we do not train the models, we set them to the "eval" mode:
+vae.eval()
+decoder.eval()
+
+
+# we will not update the network parameters
+for param in decoder.parameters():
+    param.requires_grad = False
+
+# Initialize the latent variables by encoding the noisy mixture 
+with torch.no_grad():
+    data_orig = X_abs_2
+    data = data_orig.T
+    data = torch.from_numpy(data.astype(np.float32))
+    data = data.to(device)
+    vae.eval()
+    z, _ = vae.encode(data, v)
+    z = torch.t(z)
+    
+Z_init = z.numpy()    
+# Instanciate the MCEM algo
+mcem_algo = MCEM_algo(X=X, W=W0, H=H0, Z=Z_init, v = v, decoder=decoder,
+                      niter_MCEM=niter_MCEM, niter_MH=niter_MH, burnin=burnin,
+                      var_MH=var_MH)
+
+# Run the MCEM algo
+cost, niter_final = mcem_algo.run(hop=hop, wlen=wlen, win=win, tol=tol)
+
+# Separate the sources from the estimated parameters
+mcem_algo.separate(niter_MH=100, burnin=75)
+
+s_hat = librosa.istft(stft_matrix=mcem_algo.S_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+b_hat = librosa.istft(stft_matrix=mcem_algo.N_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+
+
+# save the results:
+save_vae = os.path.join(result_dir, 'AV-VAE')
+if not os.path.isdir(save_vae):
+    os.makedirs(save_vae)
+    
+sf.write(os.path.join(save_vae,'est_speech.wav'), s_hat, fs)
+sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
+
+# Calculate SI-SNRi if clean audio is provided
+if clean_audio is not None:
+    si_snri_val, si_snr_noisy, si_snr_enhanced = si_snri(clean_audio, x, s_hat)
+    print(f'AV-VAE Results:')
+    print(f'  SI-SNR (noisy): {si_snr_noisy:.2f} dB')
+    print(f'  SI-SNR (enhanced): {si_snr_enhanced:.2f} dB')
+    print(f'  SI-SNRi: {si_snri_val:.2f} dB')
+    
+    # Save metrics to file
+    with open(os.path.join(save_vae, 'metrics.txt'), 'w') as f:
+        f.write(f'SI-SNR (noisy): {si_snr_noisy:.2f} dB\n')
+        f.write(f'SI-SNR (enhanced): {si_snr_enhanced:.2f} dB\n')
+        f.write(f'SI-SNRi: {si_snri_val:.2f} dB\n')
+
+print('AV-VAE finished ...\n')    
+    
+#%% Here, we test the performance of conditional VAE (CVAE) for audio-visual speech enhancement. The CVAE here contains a feature extractor that is
+#   shared among all the visual subnetworks. That's why we put a "Tied" in its name
+
+saved_model_av_cvae = os.path.join(models_dir, 'AV_CVAE_checkpoint.pt')     
+# Loading the pre-trained model:
+vae = CVAERTied(input_dim = input_dim, latent_dim = latent_dim, hidden_dim_encoder = hidden_dim_encoder,
+           activation = activation, activationV = activationv).to(device)
+
+checkpoint = torch.load(saved_model_av_cvae, map_location = 'cpu', weights_only=False)
+vae.load_state_dict(checkpoint['model_state_dict'], strict = False)
+   
+decoder = CDecoderRTied(vae)
+
+
+vae.eval()
+decoder.eval()
+
+
+# we will not update the network parameters
+for param in decoder.parameters():
+    param.requires_grad = False
+
+# Initialize the latent variables by encoding the noisy mixture
+    
+with torch.no_grad():
+    data_orig = X_abs_2
+    data = data_orig.T
+    data = torch.from_numpy(data.astype(np.float32))
+    data = data.to(device)
+    vae.eval()
+    z, _ = vae.encode(data, v)
+    z = torch.t(z)
+    mu_z, logvar_z = vae.zprior(v)
+    
+Z_init = z.numpy() 
+mu_z = mu_z.numpy()
+logvar_z = logvar_z.numpy()
+
+# Instanciate the MCEM algo
+mcem_algo = MCEM_algo_cvae(mu_z, logvar_z, X=X, W=W0, H=H0, Z=Z_init, v = v, decoder=decoder,
+                      niter_MCEM=niter_MCEM, niter_MH=niter_MH, burnin=burnin, var_MH=var_MH)
+
+# Run the MCEM algo
+cost, niter_final = mcem_algo.run(hop=hop, wlen=wlen, win=win, tol=tol)
+
+# Separate the sources from the estimated parameters
+mcem_algo.separate( niter_MH=100, burnin=75)
+
+s_hat = librosa.istft(stft_matrix=mcem_algo.S_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+b_hat = librosa.istft(stft_matrix=mcem_algo.N_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+
+# save the results:
+save_vae = os.path.join(result_dir, 'AV-CVAE')
+if not os.path.isdir(save_vae):
+    os.makedirs(save_vae)
+    
+sf.write(os.path.join(save_vae,'est_speech.wav'), s_hat, fs)
+sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
+
+# Calculate SI-SNRi if clean audio is provided
+if clean_audio is not None:
+    si_snri_val, si_snr_noisy, si_snr_enhanced = si_snri(clean_audio, x, s_hat)
+    print(f'AV-CVAE Results:')
+    print(f'  SI-SNR (noisy): {si_snr_noisy:.2f} dB')
+    print(f'  SI-SNR (enhanced): {si_snr_enhanced:.2f} dB')
+    print(f'  SI-SNRi: {si_snri_val:.2f} dB')
+    
+    # Save metrics to file
+    with open(os.path.join(save_vae, 'metrics.txt'), 'w') as f:
+        f.write(f'SI-SNR (noisy): {si_snr_noisy:.2f} dB\n')
+        f.write(f'SI-SNR (enhanced): {si_snr_enhanced:.2f} dB\n')
+        f.write(f'SI-SNRi: {si_snri_val:.2f} dB\n')
+            
+print('AV-CVAE finished ...\n')        
+
+#%% Here, we test the performance of audio-only VAE. For that, we need to set blockVenc = 1 and blockVdec = 1 such that
+#   the path from visual data in the encoder and decoder is blocked.
+#   The inference algorithm is based on a VI-MCEM method.
+
+saved_model_a_vae = os.path.join(models_dir, 'A_VAE_checkpoint.pt')  
+# Loading the pre-trained model:  
+vae = myVAE(input_dim = input_dim, latent_dim = latent_dim, hidden_dim_encoder = hidden_dim_encoder,
+            activation = activation, activationv = activationv,
+            blockZ = 0., blockVenc = 1., blockVdec = 1.,
+            x_block = 0., landmarks_dim = 1280).to(device)
+
+checkpoint = torch.load(saved_model_a_vae, map_location = 'cpu', weights_only=False) 
+vae.load_state_dict(checkpoint['model_state_dict'], strict = False)
+decoder = myDecoder(vae)
+
+# As we do not train the models, we set them to the "eval" mode:
+vae.eval()
+decoder.eval()
+
+v0 = np.zeros((Nl, 1280))
+v0 = torch.from_numpy(v0.astype(np.float32))
+v0.requires_grad = False
+
+# we will not update the network parameters
+for param in decoder.parameters():
+    param.requires_grad = False
+
+# Initialize the latent variables by encoding the noisy mixture 
+with torch.no_grad():
+    data_orig = X_abs_2
+    data = data_orig.T
+    data = torch.from_numpy(data.astype(np.float32))
+    data = data.to(device)
+    vae.eval()
+    z, _ = vae.encode(data, v0)
+    z = torch.t(z)
+    
+Z_init = z.numpy()    
+
+mu_z = np.zeros_like(Z_init.T)
+logvar_z = np.ones_like(Z_init.T)
+
+# Instanciate the MCEM algo
+vi_mcem_algo = VI_MCEM_algo(mu_z, logvar_z, X=X, W=W0, H=H0, Z=Z_init, v = v0, decoder=decoder,
+                      niter_VI_MCEM=niter_MCEM, niter_MH=niter_MH, burnin=burnin, var_MH=var_MH)
+
+# Run the MCEM algo
+S_hat, N_hat = vi_mcem_algo.run()
+
+# Separate the sources from the estimated parameters
+#vi_mcem_algo.separate( niter_MH=100, burnin=75)
+
+s_hat = librosa.istft(stft_matrix=S_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+b_hat = librosa.istft(stft_matrix=N_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+
+# save the results:
+save_vae = os.path.join(result_dir, 'A-VAE-VI')
+if not os.path.isdir(save_vae):
+    os.makedirs(save_vae)
+    
+sf.write(os.path.join(save_vae,'est_speech.wav'), s_hat, fs)
+sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
+
+# Calculate SI-SNRi if clean audio is provided
+if clean_audio is not None:
+    si_snri_val, si_snr_noisy, si_snr_enhanced = si_snri(clean_audio, x, s_hat)
+    print(f'A-VAE-VI Results:')
+    print(f'  SI-SNR (noisy): {si_snr_noisy:.2f} dB')
+    print(f'  SI-SNR (enhanced): {si_snr_enhanced:.2f} dB')
+    print(f'  SI-SNRi: {si_snri_val:.2f} dB')
+    
+    # Save metrics to file
+    with open(os.path.join(save_vae, 'metrics.txt'), 'w') as f:
+        f.write(f'SI-SNR (noisy): {si_snr_noisy:.2f} dB\n')
+        f.write(f'SI-SNR (enhanced): {si_snr_enhanced:.2f} dB\n')
+        f.write(f'SI-SNRi: {si_snri_val:.2f} dB\n')
+            
+print('A-VAE-VI finished ...\n')        
+
+
+#%% Here, we test the performance of conditional VAE (CVAE) for audio-visual speech enhancement. The CVAE here contains a feature extractor that is
+#   shared among all the visual subnetworks. That's why we put a "Tied" in its name
+# We use a mixed VI-MCEM method to estimate the parameters
+
+saved_model_av_cvae = os.path.join(models_dir, 'AV_CVAE_checkpoint.pt')     
+# Loading the pre-trained model:
+vae = CVAERTied(input_dim = input_dim, latent_dim = latent_dim, hidden_dim_encoder = hidden_dim_encoder,
+           activation = activation, activationV = activationv).to(device)
+
+checkpoint = torch.load(saved_model_av_cvae, map_location = 'cpu', weights_only=False)
+vae.load_state_dict(checkpoint['model_state_dict'], strict = False)
+   
+decoder = CDecoderRTied(vae)
+
+
+vae.eval()
+decoder.eval()
+
+
+# we will not update the network parameters
+for param in decoder.parameters():
+    param.requires_grad = False
+
+# Initialize the latent variables by encoding the noisy mixture
+    
+with torch.no_grad():
+    data_orig = X_abs_2
+    data = data_orig.T
+    data = torch.from_numpy(data.astype(np.float32))
+    data = data.to(device)
+    vae.eval()
+    z, _ = vae.encode(data, v)
+    z = torch.t(z)
+    mu_z, logvar_z = vae.zprior(v)
+    
+Z_init = z.numpy() 
+mu_z = mu_z.numpy()
+logvar_z = logvar_z.numpy()
+
+# Instanciate the MCEM algo
+vi_mcem_algo = VI_MCEM_algo(mu_z, logvar_z, X=X, W=W0, H=H0, Z=Z_init, v = v, decoder=decoder,
+                      niter_VI_MCEM=niter_MCEM, niter_MH=niter_MH, burnin=burnin, var_MH=var_MH)
+
+# Run the MCEM algo
+S_hat, N_hat = vi_mcem_algo.run()
+
+# Separate the sources from the estimated parameters
+#vi_mcem_algo.separate( niter_MH=100, burnin=75)
+
+s_hat = librosa.istft(stft_matrix=S_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+b_hat = librosa.istft(stft_matrix=N_hat, hop_length=hop,
+                      win_length=wlen, window=win, length=T_orig)
+
+# save the results:
+save_vae = os.path.join(result_dir, 'AV-CVAE-VI')
+if not os.path.isdir(save_vae):
+    os.makedirs(save_vae)
+    
+sf.write(os.path.join(save_vae,'est_speech.wav'), s_hat, fs)
+sf.write(os.path.join(save_vae,'est_noise.wav'), b_hat, fs)
+
+# Calculate SI-SNRi if clean audio is provided
+if clean_audio is not None:
+    si_snri_val, si_snr_noisy, si_snr_enhanced = si_snri(clean_audio, x, s_hat)
+    print(f'AV-CVAE-VI Results:')
+    print(f'  SI-SNR (noisy): {si_snr_noisy:.2f} dB')
+    print(f'  SI-SNR (enhanced): {si_snr_enhanced:.2f} dB')
+    print(f'  SI-SNRi: {si_snri_val:.2f} dB')
+    
+    # Save metrics to file
+    with open(os.path.join(save_vae, 'metrics.txt'), 'w') as f:
+        f.write(f'SI-SNR (noisy): {si_snr_noisy:.2f} dB\n')
+        f.write(f'SI-SNR (enhanced): {si_snr_enhanced:.2f} dB\n')
+        f.write(f'SI-SNRi: {si_snri_val:.2f} dB\n')
+            
+print('AV-CVAE-VI finished ...\n')        
