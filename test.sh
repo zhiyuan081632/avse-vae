@@ -1,6 +1,6 @@
 
 
-input_video=../data/lrs2_v1-sample/mvlrs_v1/main/5535415699068794046/00001.mp4
+input_video=../../data/lrs2_v1-sample/mvlrs_v1/main/5535415699068794046/00001.mp4
 input_noise=./data/noise.wav
 
 basename=$(basename ${input_video} .mp4)

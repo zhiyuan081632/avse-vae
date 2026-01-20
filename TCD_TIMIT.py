@@ -123,9 +123,17 @@ class TIMIT(data.Dataset):
             if self.video_part:
                 if  self.data_mode == 'training':           
                     # Read video data
-                    v = np.load(os.path.join(path_ntcdTr, str(self.data_mode)+'_video' , str(dialect), file_name[:-4]+'Raw.npy')) 
+                    # 路径示例: /path/to/avse/training/video/Clean/01M/sa1Raw.npy
+                    # path_ntcdTr 已经是 /path/to/avse/training
+                    training_dir = path_ntcdTr  # /path/to/avse/training
+                    video_file = os.path.join(training_dir, 'video', str(dialect), str(speaker), file_name[:-4]+'Raw.npy')
+                    v = np.load(video_file)
                 elif self.data_mode == 'validation':
-                    v = np.load(os.path.join(path_ntcdVal, str(self.data_mode)+'_video' , str(speaker), file_name[:-4]+'Raw.npy'))
+                    # 路径示例: /path/to/avse/validation/video/08F/sa1Raw.npy
+                    # path_ntcdVal 是 .../speech，需要回到 validation 目录
+                    validation_dir = os.path.dirname(path_ntcdVal)  # /path/to/avse/validation
+                    video_file = os.path.join(validation_dir, 'video', str(speaker), file_name[:-4]+'Raw.npy')
+                    v = np.load(video_file)
                 else:
                     raise NameError('Wrong "training" or "validation" mode specificed.')
             
@@ -147,7 +155,10 @@ class TIMIT(data.Dataset):
             if self.video_part:
                 self.video_data = v 
             else:
-                self.video_data = self.audio_data.copy()
+                # video_part=False: 创建与视频特征相同维度的虚拟数据 (4489 = 67x67)
+                # 这样模型的 encoder_layerV0 层能正常工作
+                landmarks_dim = 67 * 67  # 4489
+                self.video_data = np.zeros((landmarks_dim, self.audio_data.shape[1]), dtype=np.float32)
                 
             # check if num of frames equal
             self.current_frame = 0
