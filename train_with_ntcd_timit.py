@@ -11,6 +11,7 @@ from torch.utils import data
 from torch import optim
 import os
 from pathlib import Path
+import shutil
 
 # 导入项目模块
 from TCD_TIMIT import TIMIT
@@ -319,14 +320,21 @@ def train_vae_with_ntcd_timit(quick_test=False):
         final_model_path = save_dir / 'final_model_ntcd_timit_quicktest.pt'
     else:
         final_model_path = save_dir / 'final_model_ntcd_timit.pt'
-    
+        
     torch.save(vae.state_dict(), final_model_path)
+    
+    # 将最佳 checkpoint 复制/命名为预训练模型名，方便推理脚本使用
+    models_dir = Path(__file__).parent / 'saved_model'
+    models_dir.mkdir(exist_ok=True)
+    target_ckpt = models_dir / 'AV_VAE_checkpoint.pt'
+    shutil.copy2(checkpoint_path, target_ckpt)
     
     print("\n" + "=" * 80)
     print("训练完成！")
     print("=" * 80)
     print(f"最终模型已保存到: {final_model_path}")
     print(f"最佳检查点: {checkpoint_path}")
+    print(f"已同步保存到 models 目录: {target_ckpt}")
 
 
 if __name__ == '__main__':

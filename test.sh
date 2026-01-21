@@ -16,8 +16,10 @@ python extract_audio_video.py \
     --video_feat ${result_dir}/video.npy \
     --snr_db 0
 
-# Run the AVSE model to separate the audio
-python speech_enhance_VAE.py \
+# Run the different AV_VAE model to separate the audio (with noise)
+python test_avse.py \
+    --mode AV_VAE \
+    --models_dir ./saved_model/ \
     --clean_file ${result_dir}/clean.wav \
     --mix_file ${result_dir}/mix.wav \
     --video_feat ${result_dir}/video.npy \

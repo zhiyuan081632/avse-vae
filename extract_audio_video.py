@@ -272,4 +272,4 @@ if __name__ == '__main__':
         max_frames=None  # 可选：限制帧数方便调试，None 表示处理全部
     )
     
-    print(f'\n\nProcessing completed! You can now run speech_enhance_VAE.py')
+    print(f'\nExtract audio and video features completed!')

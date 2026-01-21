@@ -50,20 +50,7 @@ python3 train_with_ntcd_timit.py              # 完整训练
 python3 train_with_ntcd_timit.py --quick_test # 快速测试
 ```
 
-## run.sh 常用命令
 
-```bash
-./run.sh --help              # 查看帮助
-./run.sh --quick             # 快速测试（推荐首次使用）⭐
-./run.sh --check             # 检查环境
-./run.sh --prepare           # 仅准备数据
-./run.sh --train             # 仅训练
-./run.sh --all               # 准备+训练（完整数据）
-
-# 使用不同噪声
-./run.sh --all --noise Babble --snr 0
-./run.sh --quick --noise Babble --snr 0  # 快速测试带噪声数据
-```
 
 ## 快速测试 vs 完整训练对比
 
