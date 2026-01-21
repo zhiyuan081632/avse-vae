@@ -130,8 +130,8 @@ class TIMIT(data.Dataset):
                     v = np.load(video_file)
                 elif self.data_mode == 'validation':
                     # 路径示例: /path/to/avse/validation/video/08F/sa1Raw.npy
-                    # path_ntcdVal 是 .../speech，需要回到 validation 目录
-                    validation_dir = os.path.dirname(path_ntcdVal)  # /path/to/avse/validation
+                    # path_ntcdVal 已经是 /path/to/avse/validation
+                    validation_dir = path_ntcdVal  # /path/to/avse/validation
                     video_file = os.path.join(validation_dir, 'video', str(speaker), file_name[:-4]+'Raw.npy')
                     v = np.load(video_file)
                 else:

@@ -14,9 +14,10 @@ from torch.utils import data
 from torch import optim
 from TCD_TIMIT import TIMIT
 import matplotlib.pyplot as plt
-from AV_VAE import CVAERTied2
+from AV_VAE import CVAERTied
 import os
 import sys
+from datetime import datetime
 from pytorchtools import EarlyStopping
 import argparse
 
@@ -45,12 +46,12 @@ def main(args):
     #%% training parameters
     
     
-    data_dir_tr = '/local_scratch/smostafa/NTCD_TIMIT_dataset/training_speech/'
-    data_dir_val = '/local_scratch/smostafa/NTCD_TIMIT_dataset/validation_speech/'
+    data_dir_tr = '/mnt/d/data/NTCD-TIMIT/avse/training/speech/'
+    data_dir_val = '/mnt/d/data/NTCD-TIMIT/avse/validation/speech/'
     
-    if not os.path.isdir(data_dir_tr):
-        data_dir_tr = '/local_scratch/data/perception/smostafa/NTCD_TIMIT_dataset/training_speech/'
-        data_dir_val = '/local_scratch/data/perception/smostafa/NTCD_TIMIT_dataset/validation_speech/'    
+    # if not os.path.isdir(data_dir_tr):
+    #     data_dir_tr = '/local_scratch/data/perception/smostafa/NTCD_TIMIT_dataset/training_speech/'
+    #     data_dir_val = '/local_scratch/data/perception/smostafa/NTCD_TIMIT_dataset/validation_speech/'    
     
     file_list_tr = [os.path.join(root, name)
              for root, dirs, files in os.walk(data_dir_tr)
@@ -73,10 +74,17 @@ def main(args):
     lr = 1e-4
     epoches = 200
     batch_size = 128
-    save_dir = './saved_model_tune'
+    
+    # Generate timestamp for directory naming
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    save_dir = os.path.join('./saved_model', f'ckp_{timestamp}')
+    
     num_workers = 0
     shuffle_file_list = True
     shuffle_samples_in_batch = True
+
+    # Create save directory if it doesn't exist
+    os.makedirs(save_dir, exist_ok=True)
 
     
     device = 'cuda'
@@ -91,7 +99,7 @@ def main(args):
     train_dataset = TIMIT('training', file_list=file_list_tr, wlen_sec=wlen_sec, 
                      hop_percent=hop_percent, fs=fs, zp_percent=zp_percent, 
                      trim=trim, verbose=verbose, batch_size=batch_size, 
-                     shuffle_file_list=shuffle_file_list)
+                     shuffle_file_list=shuffle_file_list, video_part=True)
     
     # torch load will call __getitem__ of TIMIT to create Batch by randomly 
     # (if shuffle=True) selecting data sample.
@@ -104,7 +112,7 @@ def main(args):
     val_dataset = TIMIT('validation', file_list=file_list_val, wlen_sec=wlen_sec, 
                      hop_percent=hop_percent, fs=fs, zp_percent=zp_percent, 
                      trim=trim, verbose=verbose, batch_size=batch_size, 
-                     shuffle_file_list=shuffle_file_list)
+                     shuffle_file_list=shuffle_file_list, video_part=True)
     
     # torch load will call __getitem__ of TIMIT to create Batch by randomly 
     # (if shuffle=True) selecting data sample.
@@ -118,8 +126,8 @@ def main(args):
     # init model
     
     
-    vae = CVAERTied2(input_dim=input_dim, latent_dim=latent_dim, 
-            hidden_dim_encoder=hidden_dim_encoder, batch_size=batch_size, 
+    vae = CVAERTied(input_dim=input_dim, latent_dim=latent_dim, 
+            hidden_dim_encoder=hidden_dim_encoder, 
             activation=activation, activationV = activationV).to(device)
     
     #%% Pretraining:
@@ -158,11 +166,11 @@ def main(args):
     
     #%% main loop for training
         
-    save_loss_dir_tr = os.path.join(save_dir, 'Train_loss_'+str(vae_mode))  
-    save_loss_dir_val = os.path.join(save_dir, 'Validation_loss_'+str(vae_mode)) 
+    save_loss_dir_tr = os.path.join(save_dir, f'Train_loss_{vae_mode}')  
+    save_loss_dir_val = os.path.join(save_dir, f'Validation_loss_{vae_mode}') 
             
     # initialize the early_stopping object
-    checkpoint_path = os.path.join(save_dir, str(vae_mode)+'_checkpoint.pt')
+    checkpoint_path = os.path.join(save_dir, f'{vae_mode}_checkpoint.pt')
     
     early_stopping = EarlyStopping(save_dir = checkpoint_path)
     
@@ -265,8 +273,11 @@ def main(args):
             break
     
     
-    save_file = os.path.join(save_dir, 'final_model_'+str(vae_mode)+'.pt')
+    save_file = os.path.join(save_dir, f'final_model_{vae_mode}.pt')
     torch.save(vae.state_dict(), save_file)
+    print(f"\nTraining completed! Models saved to: {save_dir}")
+    print(f"  Best checkpoint: {vae_mode}_checkpoint.pt")
+    print(f"  Final model: final_model_{vae_mode}.pt")
 
 #%%
 
@@ -276,7 +287,7 @@ if __name__ == '__main__':
 
     parser.add_argument("--pgrad", type=float, default=0.2)
     parser.add_argument("--beta", type=float, default=1.0, help='weight between log p(x|z) and log p(x|zp)')
-    parser.add_argument("--vae_mode", type=str, default='a_vae', help='name of the used vae net')
+    parser.add_argument("--vae_mode", type=str, default='AV_CVAE', help='name of the used vae net')
 
     
     args = parser.parse_args()

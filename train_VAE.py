@@ -15,6 +15,7 @@ from TCD_TIMIT import TIMIT
 import matplotlib.pyplot as plt
 from AV_VAE import myVAE
 import os
+from datetime import datetime
 
 from pytorchtools import EarlyStopping
 
@@ -112,8 +113,8 @@ def main(args):
     
     #%% training parameters
     
-    data_dir_tr = './training_speech/'
-    data_dir_val = './validation_speech/'
+    data_dir_tr = '/mnt/d/data/NTCD-TIMIT/avse/training/speech/'
+    data_dir_val = '/mnt/d/data/NTCD-TIMIT/avse/validation/speech/'
     
     file_list_tr = [os.path.join(root, name)
              for root, dirs, files in os.walk(data_dir_tr)
@@ -138,10 +139,17 @@ def main(args):
     lr = args.lr
     epoches = 200
     batch_size = 128
-    save_dir = './saved_model'
+    
+    # Generate timestamp for directory naming
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    save_dir = os.path.join('./saved_model', f'ckp_{timestamp}')
+    
     num_workers = 0
     shuffle_file_list = True
     shuffle_samples_in_batch = True
+
+    # Create save directory if it doesn't exist
+    os.makedirs(save_dir, exist_ok=True)
 
     
     device = 'cuda'
@@ -217,12 +225,12 @@ def main(args):
     
     #%% main loop for training
       
-    save_loss_dir_tr = os.path.join(save_dir, 'Train_loss_'+str(vae_mode))  
-    save_loss_dir_val = os.path.join(save_dir, 'Validation_loss_'+str(vae_mode)) 
+    save_loss_dir_tr = os.path.join(save_dir, f'Train_loss_{vae_mode}')  
+    save_loss_dir_val = os.path.join(save_dir, f'Validation_loss_{vae_mode}') 
 
             
     # initialize the early_stopping object
-    checkpoint_path = os.path.join(save_dir, str(vae_mode)+'_checkpoint.pt')
+    checkpoint_path = os.path.join(save_dir, f'{vae_mode}_checkpoint.pt')
     
     early_stopping = EarlyStopping(save_dir = checkpoint_path)
     
@@ -328,8 +336,11 @@ def main(args):
             print("Early stopping")
             break
             
-    save_file = os.path.join(save_dir, 'final_model_'+str(vae_mode)+'.pt')
+    save_file = os.path.join(save_dir, f'final_model_{vae_mode}.pt')
     torch.save(vae.state_dict(), save_file)
+    print(f"\nTraining completed! Models saved to: {save_dir}")
+    print(f"  Best checkpoint: {vae_mode}_checkpoint.pt")
+    print(f"  Final model: final_model_{vae_mode}.pt")
 
 #%%
  
@@ -344,7 +355,7 @@ if __name__ == '__main__':
     parser.add_argument("--blockVdec", type=float, default=1.0)
     parser.add_argument("--blockZ", type=float, default=0.0)
     parser.add_argument("--pgrad", type=float, default=-0.2)
-    parser.add_argument("--vae_mode", type=str, default='a_vae', help='name of the used vae net')
+    parser.add_argument("--vae_mode", type=str, default='A_VAE', help='name of the used vae net')
     
     args = parser.parse_args()
 
