@@ -193,9 +193,13 @@ def main(args):
     print('len(train_dataloader.dataset)', len(train_dataloader.dataset))
     print('len(val_dataloader.dataset)', len(val_dataloader.dataset))
     
+    # 推断视觉特征维度，保证与数据集一致 ？？？
+    sample_audio_frame, sample_video_frame = train_dataset[0]
+    landmarks_dim = sample_video_frame.shape[0]
+    
     vae = myVAE(input_dim=input_dim, latent_dim=latent_dim, 
             hidden_dim_encoder=hidden_dim_encoder, activation=activation, activationv=activationv,
-            blockZ = blockZ, blockVenc = blockVenc, blockVdec = blockVdec, x_block = 0.).to(device)
+            blockZ = blockZ, blockVenc = blockVenc, blockVdec = blockVdec, x_block = 0., landmarks_dim=landmarks_dim).to(device)
     
     # optimizer
     optimizer = optim.Adam(vae.parameters(), lr=lr)
