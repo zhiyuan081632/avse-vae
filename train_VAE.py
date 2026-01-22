@@ -164,11 +164,20 @@ def main(args):
        
     #%%
     
+    # A_VAE 模式：使用 ASR 特征占位符（1280维），不使用真实视频特征
+    # AV_VAE 模式：使用真实视频特征（4489维 = 67*67）
+    if vae_mode == 'A_VAE':
+        video_part = False  # 使用零向量占位符
+        landmarks_dim = 1280  # ASR 特征维度（与预训练模型一致）
+    else:
+        video_part = True  # 使用真实视频特征
+        landmarks_dim = 67 * 67  # 4489
+    
     # create training dataloader 
     train_dataset = TIMIT('training', file_list=file_list_tr, wlen_sec=wlen_sec, 
                      hop_percent=hop_percent, fs=fs, zp_percent=zp_percent, 
                      trim=trim, verbose=verbose, batch_size=batch_size, 
-                     shuffle_file_list=shuffle_file_list)
+                     shuffle_file_list=shuffle_file_list, video_part=video_part)
     
     # torch load will call __getitem__ of TIMIT to create Batch by randomly 
     # (if shuffle=True) selecting data sample.
@@ -181,7 +190,7 @@ def main(args):
     val_dataset = TIMIT('validation', file_list=file_list_val, wlen_sec=wlen_sec, 
                      hop_percent=hop_percent, fs=fs, zp_percent=zp_percent, 
                      trim=trim, verbose=verbose, batch_size=batch_size, 
-                     shuffle_file_list=shuffle_file_list)
+                     shuffle_file_list=shuffle_file_list, video_part=video_part)
     
     # torch load will call __getitem__ of TIMIT to create Batch by randomly 
     # (if shuffle=True) selecting data sample.
@@ -192,10 +201,7 @@ def main(args):
     print('data loader')
     print('len(train_dataloader.dataset)', len(train_dataloader.dataset))
     print('len(val_dataloader.dataset)', len(val_dataloader.dataset))
-    
-    # 推断视觉特征维度，保证与数据集一致 ？？？
-    sample_audio_frame, sample_video_frame = train_dataset[0]
-    landmarks_dim = sample_video_frame.shape[0]
+    print(f'Training mode: {vae_mode}, video_part: {video_part}, landmarks_dim: {landmarks_dim}')
     
     vae = myVAE(input_dim=input_dim, latent_dim=latent_dim, 
             hidden_dim_encoder=hidden_dim_encoder, activation=activation, activationv=activationv,

@@ -155,10 +155,11 @@ class TIMIT(data.Dataset):
             if self.video_part:
                 self.video_data = v 
             else:
-                # video_part=False: 创建与视频特征相同维度的虚拟数据 (4489 = 67x67)
-                # 这样模型的 encoder_layerV0 层能正常工作
-                landmarks_dim = 67 * 67  # 4489
+                # video_part=False: 创建 ASR 特征维度的虚拟数据 (1280)
+                # 用于 A-VAE 模式，与预训练模型一致
+                landmarks_dim = 1280  # ASR feature dimension
                 self.video_data = np.zeros((landmarks_dim, self.audio_data.shape[1]), dtype=np.float32)
+                # self.video_data = self.audio_data.copy()
                 
             # check if num of frames equal
             self.current_frame = 0

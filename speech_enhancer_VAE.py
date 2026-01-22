@@ -15,8 +15,8 @@ import torch.nn as nn
 from MCEM_algo import MCEM_algo, MCEM_algo_cvae, VI_MCEM_algo
 
 from AV_VAE import myVAE, CVAERTied, myDecoder, CDecoderRTied
-from sisnr import si_snr, si_snri
 import os
+from sisnr import si_snr, si_snri
 import sys
 import argparse
 
